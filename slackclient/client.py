@@ -105,7 +105,7 @@ class SlackClient(object):
                     )
         return result
 
-    def rtm_read(self):
+    def rtm_read(self, blocking=False):
         '''
         Reads from the RTM Websocket stream then calls `self.process_changes(item)` for each line
         in the returned data.
@@ -127,7 +127,7 @@ class SlackClient(object):
         # in the future, this should handle some events internally i.e. channel
         # creation
         if self.server:
-            json_data = self.server.websocket_safe_read()
+            json_data = self.server.websocket_safe_read(blocking=blocking)
             data = []
             if json_data != '':
                 for d in json_data.split('\n'):

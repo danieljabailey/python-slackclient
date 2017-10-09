@@ -1,3 +1,4 @@
+import asyncio
 from .slackrequest import SlackRequest
 from requests.packages.urllib3.util.url import parse_url
 from .channel import Channel
@@ -5,7 +6,7 @@ from .user import User
 from .util import SearchList, SearchDict
 from ssl import SSLError
 
-from websocket import create_connection
+from websockets import client as wsclient
 import json
 
 
@@ -96,6 +97,9 @@ class Server(object):
             self.parse_channel_data(login_data["ims"])
 
     def connect_slack_websocket(self, ws_url):
+        asyncio.get_event_loop().run_until_complete(self._connect_slack_websocket(ws_url))
+
+    async def _connect_slack_websocket(self, ws_url):
         """Uses http proxy if available"""
         if self.proxies and 'http' in self.proxies:
             parts = parse_url(self.proxies['http'])
@@ -106,11 +110,14 @@ class Server(object):
             proxy_auth, proxy_port, proxy_host = None, None, None
 
         try:
-            self.websocket = create_connection(ws_url,
-                                               http_proxy_host=proxy_host,
-                                               http_proxy_port=proxy_port,
-                                               http_proxy_auth=proxy_auth)
-            self.websocket.sock.setblocking(0)
+            self.websocket = await wsclient.connect(
+                ws_url,
+                extra_headers={
+                    "http_proxy_host":proxy_host,
+                    "http_proxy_port":proxy_port,
+                    "http_proxy_auth":proxy_auth
+                }
+                )
         except Exception as e:
             raise SlackConnectionError(str(e))
 
@@ -175,26 +182,40 @@ class Server(object):
     def ping(self):
         return self.send_to_websocket({"type": "ping"})
 
-    def websocket_safe_read(self):
+
+    def websocket_safe_read(self, blocking=False):
+        readop = asyncio.Future()
+        readco = self._websocket_safe_read(readop, blocking=blocking)
+        asyncio.get_event_loop().run_until_complete(readco)
+        return readop.result()
+
+    async def _websocket_safe_read(self, readop, blocking=False):
         """ Returns data if available, otherwise ''. Newlines indicate multiple
             messages
         """
 
         data = ""
-        while True:
-            try:
-                data += "{0}\n".format(self.websocket.recv())
-            except SSLError as e:
-                if e.errno == 2:
-                    # errno 2 occurs when trying to read or write data, but more
-                    # data needs to be received on the underlying TCP transport
-                    # before the request can be fulfilled.
-                    #
-                    # Python 2.7.9+ and Python 3.3+ give this its own exception,
-                    # SSLWantReadError
-                    return ''
-                raise
-            return data.rstrip()
+        if not blocking:
+            while True:
+                try:
+                    #todo make this non-blocking
+                    data += "{0}\n".format(await self.websocket.recv())
+                except SSLError as e:
+                    if e.errno == 2:
+                        # errno 2 occurs when trying to read or write data, but more
+                        # data needs to be received on the underlying TCP transport
+                        # before the request can be fulfilled.
+                        #
+                        # Python 2.7.9+ and Python 3.3+ give this its own exception,
+                        # SSLWantReadError
+                        return ''
+                    raise
+                readop.set_result(data.rstrip())
+        else:
+            rawdata = await self.websocket.recv()
+            data += "{0}\n".format(rawdata)
+            readop.set_result(data.rstrip())
+            
 
     def attach_user(self, name, user_id, real_name, tz):
         self.users.update({user_id: User(self, name, user_id, real_name, tz)})
